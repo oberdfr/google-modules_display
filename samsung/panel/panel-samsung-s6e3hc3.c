@@ -1404,7 +1404,7 @@ const struct brightness_capability s6e3hc3_brightness_capability = {
 	.normal = {
 		.nits = {
 			.min = 2,
-			.max = 500,
+			.max = 600,
 		},
 		.level = {
 			.min = 4,
@@ -1412,20 +1412,20 @@ const struct brightness_capability s6e3hc3_brightness_capability = {
 		},
 		.percentage = {
 			.min = 0,
-			.max = 62,
+			.max = 60,
 		},
 	},
 	.hbm = {
 		.nits = {
-			.min = 550,
-			.max = 800,
+			.min = 600,
+			.max = 1200,
 		},
 		.level = {
-			.min = 2232,
-			.max = 3152,
+			.min = 2900,
+			.max = 4095,
 		},
 		.percentage = {
-			.min = 62,
+			.min = 60,
 			.max = 100,
 		},
 	},
@@ -1433,12 +1433,12 @@ const struct brightness_capability s6e3hc3_brightness_capability = {
 
 const struct exynos_panel_desc samsung_s6e3hc3 = {
 	.data_lane_cnt = 4,
-	.max_brightness = 3152,
+	.max_brightness = 4095,
 	.dft_brightness = 1023,
 	.brt_capability = &s6e3hc3_brightness_capability,
 	/* supported HDR format bitmask : 1(DOLBY_VISION), 2(HDR10), 3(HLG) */
-	.hdr_formats = BIT(2) | BIT(3),
-	.max_luminance = 8000000,
+	.hdr_formats = BIT(1) | BIT(2) | BIT(3),
+	.max_luminance = 12000000,
 	.max_avg_luminance = 1200000,
 	.min_luminance = 5,
 	.bl_range = s6e3hc3_bl_range,
