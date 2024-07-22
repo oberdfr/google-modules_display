@@ -18,6 +18,8 @@
 #include <trace/dpu_trace.h>
 
 #include "panel-samsung-drv.h"
+#include "../exynos_drm_decon.h"
+#include "../exynos_drm_drv.h"
 
 /**
  * enum s6e3hc3_panel_feature - features supported by this panel
@@ -125,6 +127,15 @@ static const unsigned char FHD_PPS_SETTING[DSC_PPS_SIZE] = {
  */
 #define S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT   600
 
+/**
+ * When linear matrix is enabled, brightness lower than this will not be sent
+ * to panel. The panel driver IC gets this value instead, and DPP is engaged to
+ * apply a mask with matrix:
+ * (RR = BB = GG = requested brightness / this value * 100%)
+ * on the image to bring the actual brightness down.
+ */
+#define LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT  300
+
 static const u8 unlock_cmd_f0[] = { 0xF0, 0x5A, 0x5A };
 static const u8 lock_cmd_f0[]   = { 0xF0, 0xA5, 0xA5 };
 static const u8 display_off[] = { 0x28 };
@@ -187,29 +198,32 @@ module_param(use_segmented_dimming, int, 0644);
 int segmented_dimming_switch_threshold = S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT;
 module_param(segmented_dimming_switch_threshold, int, 0644);
 
-u8 freq_cmd[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd, byte, NULL, 0644);
 
-u8 freq_cmd_ns[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_ns[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_ns, byte, NULL, 0644);
 
-u8 freq_cmd_high_brightness[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_high_brightness[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_high_brightness, byte, NULL, 0644);
 
-u8 freq_cmd_high_brightness_ns[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_high_brightness_ns[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_high_brightness_ns, byte, NULL, 0644);
 
-u8 freq_cmd_hbm[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_hbm, byte, NULL, 0644);
 
-u8 freq_cmd_hbm_ns[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm_ns[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_hbm_ns, byte, NULL, 0644);
 
-u8 freq_cmd_hbm_high_brightness[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm_high_brightness[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_hbm_high_brightness, byte, NULL, 0644);
 
-u8 freq_cmd_hbm_high_brightness_ns[4] = {0x00, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm_high_brightness_ns[4] = {0x01, 0x43, 0x43, 0x03};
 module_param_array(freq_cmd_hbm_high_brightness_ns, byte, NULL, 0644);
+
+int linear_matrix_application_threshold = LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT;
+module_param(linear_matrix_application_threshold, int, 0644);
 
 struct s6e3hc3_freq_cmdset {
 	u8 *cmd;
@@ -239,6 +253,120 @@ struct s6e3hc3_freq_cmdset s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_TYPE_MAX] = 
 	},
 };
 
+static int ea_set_matrix(struct drm_crtc *crtc, unsigned int bl_lvl)
+{
+	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+	struct exynos_matrix matrix;
+	struct drm_property *prop_linear_matrix_override;
+	struct drm_property_blob *pblob = NULL;
+	struct exynos_drm_crtc_state fake_crtc_state;
+	uint32_t blob_id;
+	__u16 ofs, coef;
+	int rc = 0;
+
+	if (crtc == NULL) {
+		pr_err("crtc has not been initialized\n");
+		rc = -EIO;
+		goto exit;
+	}
+
+	prop_linear_matrix_override = exynos_crtc->props.linear_matrix_override;
+	if (prop_linear_matrix_override == NULL) {
+		pr_err("linear matrix overriding is not supported by crtc\n");
+		rc = -EIO;
+		goto exit;
+	}
+
+	/* Will this ever happen? */
+	if (strcmp(prop_linear_matrix_override->name,
+		   "linear_matrix_override") != 0) {
+		pr_err("property name verification failed: %s\n",
+		       prop_linear_matrix_override->name);
+		rc = -EIO;
+		goto exit;
+	}
+
+	if (bl_lvl == 0) {
+		goto setup;
+	}
+
+	/*
+	 * Beware: the override itself does not form the final matrix.
+	 * It's ratio that would be applied to linear matrix requested by
+	 * userspace, and we need to set all elements in this matrix.
+	 */
+	ofs = LINEAR_MATRIX_OVERRIDE_SCALE_FACTOR; // = 100% (no scale)
+	matrix.offsets[0] = ofs;
+	matrix.offsets[1] = ofs;
+	matrix.offsets[2] = ofs;
+
+	coef = bl_lvl * LINEAR_MATRIX_OVERRIDE_SCALE_FACTOR /
+	       linear_matrix_application_threshold;
+	matrix.coeffs[0] = coef;
+	matrix.coeffs[1] = coef;
+	matrix.coeffs[2] = coef;
+	matrix.coeffs[3] = coef;
+	matrix.coeffs[4] = coef;
+	matrix.coeffs[5] = coef;
+	matrix.coeffs[6] = coef;
+	matrix.coeffs[7] = coef;
+	matrix.coeffs[8] = coef;
+
+	pblob = drm_property_create_blob(crtc->dev,
+					 sizeof(struct exynos_matrix), &matrix);
+	if (IS_ERR_OR_NULL(pblob)) {
+		pr_err("failed to create blob\n");
+		rc = -ENOMEM;
+		goto exit;
+	}
+
+setup:
+	/* This is not a complete DRM call, and never designed to be so.
+	 *
+	 * When exiting from LP mode (AOD), this function will be called during
+	 * userspace commit with crtc->mutex held by ourself, and we can not
+	 * use drm_crtc_get_state() here. Even if breaking AOD is acceptable,
+	 * we could not commit the change from here. I can't think of anything to
+	 * make this code less hacky.
+	 *
+	 * The crtc state here is one time use and thrown away after this call.
+	 * The crtc driver code saves the matrix into a global variable instead
+	 * upon receiving the atomic_set_property call. We need to free the
+	 * resources related to the state ourselves.
+	 */
+	memset(&fake_crtc_state, 0, sizeof(fake_crtc_state));
+	fake_crtc_state.base.crtc = crtc;
+
+	if (bl_lvl == 0)
+		blob_id = 0; // erase matrix
+	else
+		blob_id = pblob->base.id;
+
+	crtc->funcs->atomic_set_property(crtc, &fake_crtc_state.base,
+					 prop_linear_matrix_override, blob_id);
+
+	drm_property_blob_put(pblob);
+
+exit:
+	return rc;
+}
+
+static unsigned int ea_panel_calc_backlight(unsigned int bl_lvl)
+{
+	struct decon_device *decon = get_decon_drvdata(0);
+
+	if (linear_matrix_application_threshold == 0) {
+		linear_matrix_application_threshold = 1; // avoid dividing by 0
+	}
+
+	if (bl_lvl != 0 && bl_lvl < linear_matrix_application_threshold) {
+		ea_set_matrix(&decon->crtc->base, bl_lvl);
+		return linear_matrix_application_threshold;
+	} else {
+		ea_set_matrix(&decon->crtc->base, 0);
+		return bl_lvl;
+	}
+}
 
 static void s6e3hc3_send_dimming_freq_cmd(struct exynos_panel *ctx, int need_unlock, const u8 *cmd)
 {
@@ -563,64 +691,158 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 * and operation set, depending on FI mode.
 	 */
 	if (test_bit(FEAT_FRAME_AUTO, spanel->feat)) {
-		if (test_bit(FEAT_HBM, spanel->feat)) {
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
-			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x14);
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-			if (test_bit(FEAT_OP_NS, spanel->feat)) {
-				/* suppose that idle_vrefresh == 30 */
-				EXYNOS_DCS_BUF_ADD(ctx,
-					0xBD, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			/* threshold setting */
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x0C, 0xBD);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00);
+		} else {
+			/* initial frequency */
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x92, 0xBD);
+			if (vrefresh == 60) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x01 : 0x02;
 			} else {
-				/* suppose that idle_vrefresh == 30 */
-				EXYNOS_DCS_BUF_ADD(ctx,
-					0xBD, 0x01, 0x00, 0x03, 0x00, 0x02, 0x01);
+				if (vrefresh != 120)
+					dev_warn(ctx->dev, "%s: unsupported init freq %d (hs)\n",
+						 __func__, vrefresh);
+				/* 120Hz */
+				val = 0x00;
+			}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, val);
+		}
+		/* target frequency */
+		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			if (idle_vrefresh == 30) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x02 : 0x04;
+			} else if (idle_vrefresh == 10) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x0A : 0x14;
+			} else {
+				if (idle_vrefresh != 1)
+					dev_warn(ctx->dev, "%s: unsupported target freq %d (ns)\n",
+						 __func__, idle_vrefresh);
+				/* 1Hz */
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x76 : 0xEC;
+			}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, val);
+		} else {
+			if (idle_vrefresh == 30) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x03 : 0x06;
+			} else if (idle_vrefresh == 10) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x0B : 0x16;
+			} else {
+				if (idle_vrefresh != 1)
+					dev_warn(ctx->dev, "%s: unsupported target freq %d (hs)\n",
+						 __func__, idle_vrefresh);
+				/* 1Hz */
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x77 : 0xEE;
+			}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, val);
+		}
+		/* step setting */
+		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x9E, 0xBD);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			if (test_bit(FEAT_HBM, spanel->feat))
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x02, 0x00, 0x0A, 0x00, 0x00);
+			else
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x04, 0x00, 0x14, 0x00, 0x00);
+		} else {
+			if (test_bit(FEAT_HBM, spanel->feat))
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x01, 0x00, 0x03, 0x00, 0x0B);
+			else
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x02, 0x00, 0x06, 0x00, 0x16);
+		}
+		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0xAE, 0xBD);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			if (idle_vrefresh == 30) {
+				/* 60Hz -> 30Hz idle */
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00);
+			} else if (idle_vrefresh == 10) {
+				/* 60Hz -> 10Hz idle */
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x00);
+			} else {
+				if (idle_vrefresh != 1)
+					dev_warn(ctx->dev, "%s: unsupported freq step to %d (ns)\n",
+						 __func__, idle_vrefresh);
+				/* 60Hz -> 1Hz idle */
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x03, 0x00);
 			}
 		} else {
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-			if (test_bit(FEAT_OP_NS, spanel->feat)) {
-				if (idle_vrefresh == 10)
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x05, 0x00, 0x01, 0x01);
-				/* idle_vrefresh == 30 */
-				else
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00);
+			if (vrefresh == 60) {
+				if (idle_vrefresh == 30) {
+					/* 60Hz -> 30Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x00);
+				} else if (idle_vrefresh == 10) {
+					/* 60Hz -> 10Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x01, 0x00);
+				} else {
+					if (idle_vrefresh != 1)
+						dev_warn(ctx->dev, "%s: unsupported freq step to %d (hs)\n",
+							 __func__, vrefresh);
+					/* 60Hz -> 1Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x01, 0x03);
+				}
 			} else {
-				if (idle_vrefresh == 10)
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x0B, 0x00, 0x03, 0x01);
-				else if (idle_vrefresh == 30)
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x03, 0x00, 0x02, 0x01);
-				/* idle_vrefresh == 60 */
-				else
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x01, 0x00, 0x02, 0x01);
+				if (vrefresh != 120)
+					dev_warn(ctx->dev, "%s: unsupported freq step from %d (hs)\n",
+						 __func__, vrefresh);
+				if (idle_vrefresh == 30) {
+					/* 120Hz -> 30Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00);
+				} else if (idle_vrefresh == 10) {
+					/* 120Hz -> 10Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x03, 0x00);
+				} else {
+					if (idle_vrefresh != 1)
+						dev_warn(ctx->dev, "%s: unsupported freq step to %d (hs)\n",
+						 __func__, idle_vrefresh);
+					/* 120Hz -> 1Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x01, 0x03);
+				}
 			}
 		}
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x23);
-	} else {
+		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0xA3);
+	} else { /* manual */
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21);
 		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			if (vrefresh == 10)
+			if (vrefresh == 1) {
+				val = 0x1F;
+			} else if (vrefresh == 5) {
+				val = 0x1E;
+			} else if (vrefresh == 10) {
 				val = 0x1B;
-			else if (vrefresh == 30)
+			} else if (vrefresh == 30) {
 				val = 0x19;
-			else
-				val = 0x18;
+			} else {
+				if (vrefresh != 60)
+					dev_warn(ctx->dev,
+						 "%s: unsupported manual freq %d (ns)\n",
+						 __func__, vrefresh);
+				/* 60Hz */
+				val = 0x1;
+			}
 		} else {
-			if (vrefresh == 10)
+			if (vrefresh == 1) {
+				val = 0x07;
+			} else if (vrefresh == 5) {
+				val = 0x06;
+			} else if (vrefresh == 10) {
 				val = 0x03;
-			else if (vrefresh == 30)
+			} else if (vrefresh == 30) {
 				val = 0x02;
-			else if (vrefresh == 60)
+			} else if (vrefresh == 60) {
 				val = 0x01;
-			else
+			} else {
+				if (vrefresh != 120)
+					dev_warn(ctx->dev,
+						 "%s: unsupported manual freq %d (hs)\n",
+						 __func__, vrefresh);
+				/* 120Hz */
 				val = 0x00;
+			}
 		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0x60, val);
 	}
+
 
 	EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
 	EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);;
@@ -849,7 +1071,9 @@ static void s6e3hc3_write_display_mode(struct exynos_panel *ctx,
 #define MAX_BR_HBM_EVT1 3949
 static int s6e3hc3_set_brightness(struct exynos_panel *ctx, u16 br)
 {
-	u16 brightness;
+	int ret;
+	u16 brightness, orig_br;
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 
 	if (ctx->current_mode->exynos_mode.is_lp_mode) {
 		const struct exynos_panel_funcs *funcs;
@@ -866,9 +1090,17 @@ static int s6e3hc3_set_brightness(struct exynos_panel *ctx, u16 br)
 			__func__, MAX_BR_HBM_EVT1);
 	}
 
+	orig_br = br;
+	if (use_linear_matrix)
+		br = ea_panel_calc_backlight(br);
+	
 	brightness = (br & 0xff) << 8 | br >> 8;
+	ret = exynos_dcs_set_brightness(ctx, brightness);
 
-	return exynos_dcs_set_brightness(ctx, brightness);
+	if (!ret)
+		spanel->requested_brightness = orig_br;
+
+	return ret;
 }
 
 static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
