@@ -18,6 +18,8 @@
 #include <trace/dpu_trace.h>
 
 #include "panel-samsung-drv.h"
+#include "exposure-adj.h"
+
 
 /**
  * enum s6e3hc3_panel_feature - features supported by this panel
@@ -68,6 +70,9 @@ struct s6e3hc3_panel {
 	u32 auto_mode_vrefresh;
 	/** @force_changeable_te: force changeable TE (instead of fixed) during early exit */
 	bool force_changeable_te;
+
+	/** @requested_brightness: requested brightness before exposure adjustment */
+	u16 requested_brightness;
 
 	/** @local_hbm_gamma: lhbm gamma data */
 	struct local_hbm_gamma {
@@ -161,6 +166,45 @@ static const struct exynos_binned_lp s6e3hc3_binned_lp[] = {
 	BINNED_LP_MODE_TIMING("low", 80, s6e3hc3_lp_low_cmds, 16, 48),
 	BINNED_LP_MODE_TIMING("high", 2047, s6e3hc3_lp_high_cmds, 16, 48)
 };
+
+u8 freq_cmd[4] = { 0x00, 0x43, 0x43, 0x03 };
+module_param_array(freq_cmd, byte, NULL, 0644);
+
+static void s6e3hc3_send_dimming_freq_cmd(struct exynos_panel *ctx, int need_unlock, const u8 *cmd)
+{
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+
+	if (need_unlock)
+		EXYNOS_DCS_BUF_ADD_SET(ctx, unlock_cmd_f0);
+
+	if (test_bit(FEAT_EARLY_EXIT, spanel->feat)) {
+		if (test_bit(FEAT_HBM, spanel->feat))
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x00, 0x83, 0x03, 0x01);
+		else
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+	} else {
+		if (test_bit(FEAT_HBM, spanel->feat))
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x80, 0x83, 0x03, 0x01);
+		else
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0] | 0x80, cmd[1], cmd[2], cmd[3]);
+	}
+	if (need_unlock) {
+		EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+		EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);
+	}
+}
+
+static void s6e3hc3_set_default_dimming(struct exynos_panel *ctx, int need_unlock)
+{
+	static const u8 cmd[4] = { 0x01, 0x83, 0x03, 0x03 };
+
+	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, cmd);
+}
+
+static void s6e3hc3_set_override_dimming(struct exynos_panel *ctx, int need_unlock)
+{
+	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, freq_cmd);
+}
 
 static u8 s6e3hc3_get_te2_option(struct exynos_panel *ctx)
 {
@@ -359,25 +403,26 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 *
 	 * Description: early-exit sequence overrides some configs HBM set.
 	 */
-	if (test_bit(FEAT_EARLY_EXIT, spanel->feat)) {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x10);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x03, 0x00, 0x0B, 0x00, 0x0B, 0x00,
-				 0x0B, 0x00, 0x0B, 0x00, 0x0B, 0x00, 0x00, 0x00,
-				 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				 0x00, 0x00, 0x00, 0x00, 0x00);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
+	if (is_panel_enabled(ctx))
+		s6e3hc3_set_override_dimming(ctx, 0);
+	else
+		s6e3hc3_set_default_dimming(ctx, 0);
+	val = test_bit(FEAT_OP_NS, feat) ? 0x4E : 0x1E;
+	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, val, 0xBD);
+	if (test_bit(FEAT_HBM, feat)) {
+		if (test_bit(FEAT_OP_NS, feat))
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x02,
+				0x00, 0x04, 0x00, 0x0A);
+		else
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x01,
+				0x00, 0x03, 0x00, 0x0B);
 	} else {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x82);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x03, 0x00, 0x09, 0x00, 0x21, 0x00, 0x21, 0x00,
-				 0x21, 0x00, 0x21, 0x00, 0x21, 0x00, 0x00, 0x00,
-				 0x03, 0x00, 0x06, 0x00, 0x09, 0x00, 0x0C, 0x00,
-				 0x0F, 0x00, 0x0F, 0x00, 0x0F);
+		if (test_bit(FEAT_OP_NS, feat))
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x04,
+				0x00, 0x08, 0x00, 0x14);
+		else
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x02,
+				0x00, 0x06, 0x00, 0x16);
 	}
 
 	/*
@@ -1044,11 +1089,20 @@ static void s6e3hc3_set_local_hbm_mode(struct exynos_panel *ctx,
 				 bool local_hbm_en)
 {
 	const struct exynos_panel_mode *pmode = ctx->current_mode;
+
+	if (local_hbm_en)
+		s6e3hc3_set_default_dimming(ctx, 1);
+
 	const u32 flags = PANEL_CMD_SET_IGNORE_VBLANK | PANEL_CMD_SET_BATCH;
 
 	if (local_hbm_en)
 		exynos_panel_send_cmd_set_flags(ctx,
 			&s6e3hc3_lhbm_extra_cmd_set, flags);
+
+	if (!local_hbm_en) {
+		s6e3hc3_set_override_dimming(ctx, 1);
+	}
+
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 }
 
