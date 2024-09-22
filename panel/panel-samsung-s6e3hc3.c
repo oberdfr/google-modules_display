@@ -189,6 +189,9 @@ static const struct exynos_binned_lp s6e3hc3_binned_lp[] = {
  *  Define PWM dimming frequency settings here, based on the s6e3hc3 driver mod
  */
 
+int enable_pwm_mod = 0;
+module_param(enable_pwm_mod, int, 0644);
+
 int use_linear_matrix = 1;
 module_param(use_linear_matrix, int, 0644);
 
@@ -657,10 +660,13 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 *
 	 * Description: early-exit sequence overrides some configs HBM set.
 	 */
-	if (is_panel_enabled(ctx) && !ctx->current_mode->exynos_mode.is_lp_mode)
-		s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
-	else
-		s6e3hc3_set_default_dimming(ctx, spanel->feat, false);
+	if (is_panel_enabled(ctx) && !ctx->current_mode->exynos_mode.is_lp_mode) {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+	} else {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+	}
 	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
 	val = test_bit(FEAT_EARLY_EXIT, spanel->feat) ? 0x22 : 0x00;
 	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, val);
@@ -691,158 +697,64 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 * and operation set, depending on FI mode.
 	 */
 	if (test_bit(FEAT_FRAME_AUTO, spanel->feat)) {
-		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			/* threshold setting */
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x0C, 0xBD);
-			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00);
-		} else {
-			/* initial frequency */
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x92, 0xBD);
-			if (vrefresh == 60) {
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x01 : 0x02;
+		if (test_bit(FEAT_HBM, spanel->feat)) {
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x14);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
+			if (test_bit(FEAT_OP_NS, spanel->feat)) {
+				/* suppose that idle_vrefresh == 30 */
+				EXYNOS_DCS_BUF_ADD(ctx,
+					0xBD, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00);
 			} else {
-				if (vrefresh != 120)
-					dev_warn(ctx->dev, "%s: unsupported init freq %d (hs)\n",
-						 __func__, vrefresh);
-				/* 120Hz */
-				val = 0x00;
-			}
-			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, val);
-		}
-		/* target frequency */
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
-		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			if (idle_vrefresh == 30) {
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x02 : 0x04;
-			} else if (idle_vrefresh == 10) {
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x0A : 0x14;
-			} else {
-				if (idle_vrefresh != 1)
-					dev_warn(ctx->dev, "%s: unsupported target freq %d (ns)\n",
-						 __func__, idle_vrefresh);
-				/* 1Hz */
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x76 : 0xEC;
-			}
-			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, val);
-		} else {
-			if (idle_vrefresh == 30) {
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x03 : 0x06;
-			} else if (idle_vrefresh == 10) {
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x0B : 0x16;
-			} else {
-				if (idle_vrefresh != 1)
-					dev_warn(ctx->dev, "%s: unsupported target freq %d (hs)\n",
-						 __func__, idle_vrefresh);
-				/* 1Hz */
-				val = test_bit(FEAT_HBM, spanel->feat) ? 0x77 : 0xEE;
-			}
-			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, val);
-		}
-		/* step setting */
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x9E, 0xBD);
-		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			if (test_bit(FEAT_HBM, spanel->feat))
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x02, 0x00, 0x0A, 0x00, 0x00);
-			else
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x04, 0x00, 0x14, 0x00, 0x00);
-		} else {
-			if (test_bit(FEAT_HBM, spanel->feat))
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x01, 0x00, 0x03, 0x00, 0x0B);
-			else
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x02, 0x00, 0x06, 0x00, 0x16);
-		}
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0xAE, 0xBD);
-		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			if (idle_vrefresh == 30) {
-				/* 60Hz -> 30Hz idle */
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00);
-			} else if (idle_vrefresh == 10) {
-				/* 60Hz -> 10Hz idle */
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x00);
-			} else {
-				if (idle_vrefresh != 1)
-					dev_warn(ctx->dev, "%s: unsupported freq step to %d (ns)\n",
-						 __func__, idle_vrefresh);
-				/* 60Hz -> 1Hz idle */
-				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x03, 0x00);
+				/* suppose that idle_vrefresh == 30 */
+				EXYNOS_DCS_BUF_ADD(ctx,
+					0xBD, 0x01, 0x00, 0x03, 0x00, 0x02, 0x01);
 			}
 		} else {
-			if (vrefresh == 60) {
-				if (idle_vrefresh == 30) {
-					/* 60Hz -> 30Hz idle */
-					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x00);
-				} else if (idle_vrefresh == 10) {
-					/* 60Hz -> 10Hz idle */
-					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x01, 0x00);
-				} else {
-					if (idle_vrefresh != 1)
-						dev_warn(ctx->dev, "%s: unsupported freq step to %d (hs)\n",
-							 __func__, vrefresh);
-					/* 60Hz -> 1Hz idle */
-					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x01, 0x03);
-				}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
+			if (test_bit(FEAT_OP_NS, spanel->feat)) {
+				if (idle_vrefresh == 10)
+					EXYNOS_DCS_BUF_ADD(ctx,
+						0xBD, 0x01, 0x00, 0x05, 0x00, 0x01, 0x01);
+				/* idle_vrefresh == 30 */
+				else
+					EXYNOS_DCS_BUF_ADD(ctx,
+						0xBD, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00);
 			} else {
-				if (vrefresh != 120)
-					dev_warn(ctx->dev, "%s: unsupported freq step from %d (hs)\n",
-						 __func__, vrefresh);
-				if (idle_vrefresh == 30) {
-					/* 120Hz -> 30Hz idle */
-					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00);
-				} else if (idle_vrefresh == 10) {
-					/* 120Hz -> 10Hz idle */
-					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x03, 0x00);
-				} else {
-					if (idle_vrefresh != 1)
-						dev_warn(ctx->dev, "%s: unsupported freq step to %d (hs)\n",
-						 __func__, idle_vrefresh);
-					/* 120Hz -> 1Hz idle */
-					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x01, 0x03);
-				}
+				if (idle_vrefresh == 10)
+					EXYNOS_DCS_BUF_ADD(ctx,
+						0xBD, 0x01, 0x00, 0x0B, 0x00, 0x03, 0x01);
+				else if (idle_vrefresh == 30)
+					EXYNOS_DCS_BUF_ADD(ctx,
+						0xBD, 0x01, 0x00, 0x03, 0x00, 0x02, 0x01);
+				/* idle_vrefresh == 60 */
+				else
+					EXYNOS_DCS_BUF_ADD(ctx,
+						0xBD, 0x01, 0x00, 0x01, 0x00, 0x02, 0x01);
 			}
 		}
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0xA3);
-	} else { /* manual */
+		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x23);
+	} else {
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21);
 		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			if (vrefresh == 1) {
-				val = 0x1F;
-			} else if (vrefresh == 5) {
-				val = 0x1E;
-			} else if (vrefresh == 10) {
+			if (vrefresh == 10)
 				val = 0x1B;
-			} else if (vrefresh == 30) {
+			else if (vrefresh == 30)
 				val = 0x19;
-			} else {
-				if (vrefresh != 60)
-					dev_warn(ctx->dev,
-						 "%s: unsupported manual freq %d (ns)\n",
-						 __func__, vrefresh);
-				/* 60Hz */
-				val = 0x1;
-			}
+			else
+				val = 0x18;
 		} else {
-			if (vrefresh == 1) {
-				val = 0x07;
-			} else if (vrefresh == 5) {
-				val = 0x06;
-			} else if (vrefresh == 10) {
+			if (vrefresh == 10)
 				val = 0x03;
-			} else if (vrefresh == 30) {
+			else if (vrefresh == 30)
 				val = 0x02;
-			} else if (vrefresh == 60) {
+			else if (vrefresh == 60)
 				val = 0x01;
-			} else {
-				if (vrefresh != 120)
-					dev_warn(ctx->dev,
-						 "%s: unsupported manual freq %d (hs)\n",
-						 __func__, vrefresh);
-				/* 120Hz */
+			else
 				val = 0x00;
-			}
 		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0x60, val);
 	}
-
 
 	EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
 	EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);;
@@ -1116,7 +1028,8 @@ static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
 	EXYNOS_DCS_WRITE_TABLE(ctx, display_off);
 	usleep_range(delay_us, delay_us + 10);
 	/* backlight control and dimming */
-	s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
+	if (enable_pwm_mod == 1)
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 	s6e3hc3_change_frequency(ctx, pmode);
 	usleep_range(delay_us, delay_us + 10);
@@ -1281,7 +1194,8 @@ static int s6e3hc3_enable(struct drm_panel *panel)
 	else if (needs_reset || (ctx->panel_state == PANEL_STATE_BLANK))
 		EXYNOS_DCS_WRITE_TABLE(ctx, display_on);
 
-	s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
+	if (enable_pwm_mod == 1)
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
 
 	return 0;
 }
@@ -1461,11 +1375,13 @@ static void s6e3hc3_set_local_hbm_mode(struct exynos_panel *ctx,
 	const u32 flags = PANEL_CMD_SET_IGNORE_VBLANK | PANEL_CMD_SET_BATCH;
 
 	if (local_hbm_en){
-		s6e3hc3_set_default_dimming(ctx, spanel->feat, true);
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_default_dimming(ctx, spanel->feat, true);
 		exynos_panel_send_cmd_set_flags(ctx,
 			&s6e3hc3_lhbm_extra_cmd_set, flags);
 	} else {
-		s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
 	}
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 }
