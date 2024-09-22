@@ -136,6 +136,16 @@ static const unsigned char FHD_PPS_SETTING[DSC_PPS_SIZE] = {
  */
 #define LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT  0
 
+/**
+ * Minimum coefficient to avoid blackout (1% brightness)
+ */
+#define LINEAR_MATRIX_MIN_COEF_VALUE 500
+
+/**
+ * Factor to control non-linear dimming (higher = less aggressive)
+ */
+#define LINEAR_MATRIX_DIMMING_CURVE_FACTOR 2048
+
 static const u8 unlock_cmd_f0[] = { 0xF0, 0x5A, 0x5A };
 static const u8 lock_cmd_f0[]   = { 0xF0, 0xA5, 0xA5 };
 static const u8 display_off[] = { 0x28 };
@@ -195,6 +205,15 @@ module_param(enable_pwm_mod, int, 0644);
 int use_linear_matrix = 1;
 module_param(use_linear_matrix, int, 0644);
 
+int linear_matrix_application_threshold = LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT;
+module_param(linear_matrix_application_threshold, int, 0644);
+
+int linear_matrix_min_coeff_value = LINEAR_MATRIX_MIN_COEF_VALUE;
+module_param(linear_matrix_min_coeff_value, int, 0644);
+
+int linear_matrix_dimming_curve_factor = LINEAR_MATRIX_DIMMING_CURVE_FACTOR;
+module_param(linear_matrix_dimming_curve_factor, int, 0644);
+
 int use_segmented_dimming = 0;
 module_param(use_segmented_dimming, int, 0644);
 
@@ -224,9 +243,6 @@ module_param_array(freq_cmd_hbm_high_brightness, byte, NULL, 0644);
 
 u8 freq_cmd_hbm_high_brightness_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_hbm_high_brightness_ns, byte, NULL, 0644);
-
-int linear_matrix_application_threshold = LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT;
-module_param(linear_matrix_application_threshold, int, 0644);
 
 struct s6e3hc3_freq_cmdset {
 	u8 *cmd;
@@ -303,8 +319,14 @@ static int ea_set_matrix(struct drm_crtc *crtc, unsigned int bl_lvl)
 	matrix.offsets[1] = ofs;
 	matrix.offsets[2] = ofs;
 
-	coef = bl_lvl * LINEAR_MATRIX_OVERRIDE_SCALE_FACTOR /
-	       linear_matrix_application_threshold;
+	coef = (LINEAR_MATRIX_OVERRIDE_SCALE_FACTOR - linear_matrix_dimming_curve_factor) 
+		* bl_lvl / linear_matrix_application_threshold;
+
+	// Ensure the coefficient doesn't go below a minimum value to avoid blackout
+	if (coef < linear_matrix_min_coeff_value) {
+    	coef = linear_matrix_min_coeff_value;
+	}
+
 	matrix.coeffs[0] = coef;
 	matrix.coeffs[1] = coef;
 	matrix.coeffs[2] = coef;
@@ -386,17 +408,14 @@ static void s6e3hc3_send_dimming_freq_cmd(struct exynos_panel *ctx, int need_unl
 
 static void s6e3hc3_set_default_dimming(struct exynos_panel *ctx, const unsigned long *feat, int need_unlock)
 {
-	static const u8 cmd[4] = {0x01, 0x83, 0x03, 0x03};
-	static const u8 hbm_cmd[4] = {0x00, 0x83, 0x03, 0x01};
+	static const u8 cmd[4] = {0x02, 0xBD, 0x00, 0x10};
+	static const u8 cmd_early_exit[4] = {0x82, 0xBD, 0x00, 0x10};
 	u8 target_cmd[4];
 
-	if (test_bit(FEAT_HBM, feat))
-		memcpy(target_cmd, hbm_cmd, 4);
+	if (test_bit(FEAT_EARLY_EXIT, feat))
+		memcpy(target_cmd, cmd_early_exit, 4);
 	else
 		memcpy(target_cmd, cmd, 4);
-
-	if (!test_bit(FEAT_EARLY_EXIT, feat))
-		target_cmd[0] |= 0x80;
 
 	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, target_cmd);
 }
@@ -689,7 +708,7 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
 	} else {
 		if (enable_pwm_mod == 1)
-			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+			s6e3hc3_set_default_dimming(ctx, spanel->feat, false);
 	}
 
 	/*
