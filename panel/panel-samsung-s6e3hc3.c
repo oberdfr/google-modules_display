@@ -18,6 +18,8 @@
 #include <trace/dpu_trace.h>
 
 #include "panel-samsung-drv.h"
+#include "../exynos_drm_decon.h"
+#include "../exynos_drm_drv.h"
 
 /**
  * enum s6e3hc3_panel_feature - features supported by this panel
@@ -69,6 +71,9 @@ struct s6e3hc3_panel {
 	/** @force_changeable_te: force changeable TE (instead of fixed) during early exit */
 	bool force_changeable_te;
 
+	/** @requested_brightness: requested brightness before exposure adjustment */
+	u16 requested_brightness;
+
 	/** @local_hbm_gamma: lhbm gamma data */
 	struct local_hbm_gamma {
 		u8 gamma_cmd[LHBM_GAMMA_CMD_SIZE];
@@ -112,6 +117,34 @@ static const unsigned char FHD_PPS_SETTING[DSC_PPS_SIZE] = {
 
 #define S6E3HC3_TE2_CHANGEABLE 0x31
 #define S6E3HC3_TE2_FIXED      0x41
+
+/**
+ * When segmented dimming is enabled, brightness higher than this is treated as
+ * high brightness and uses freq_cmd_high_brightness for backlight control.
+ * Otherwise freq_cmd is used.
+ *
+ * This feature is not turned on by default, and the default value is not tuned.
+ */
+#define S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT   0
+
+/**
+ * When linear matrix is enabled, brightness lower than this will not be sent
+ * to panel. The panel driver IC gets this value instead, and DPP is engaged to
+ * apply a mask with matrix:
+ * (RR = BB = GG = requested brightness / this value * 100%)
+ * on the image to bring the actual brightness down.
+ */
+#define LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT  0
+
+/**
+ * Minimum coefficient to avoid blackout (1% brightness)
+ */
+#define LINEAR_MATRIX_MIN_COEF_VALUE 500
+
+/**
+ * Factor to control non-linear dimming (higher = less aggressive)
+ */
+#define LINEAR_MATRIX_DIMMING_CURVE_FACTOR 2048
 
 static const u8 unlock_cmd_f0[] = { 0xF0, 0x5A, 0x5A };
 static const u8 lock_cmd_f0[]   = { 0xF0, 0xA5, 0xA5 };
@@ -161,6 +194,276 @@ static const struct exynos_binned_lp s6e3hc3_binned_lp[] = {
 	BINNED_LP_MODE_TIMING("low", 80, s6e3hc3_lp_low_cmds, 16, 48),
 	BINNED_LP_MODE_TIMING("high", 2047, s6e3hc3_lp_high_cmds, 16, 48)
 };
+
+/*
+ *  Define PWM dimming frequency settings here, based on the s6e3hc3 driver mod
+ */
+
+int enable_pwm_mod = 0;
+module_param(enable_pwm_mod, int, 0644);
+
+int use_linear_matrix = 1;
+module_param(use_linear_matrix, int, 0644);
+
+int linear_matrix_application_threshold = LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT;
+module_param(linear_matrix_application_threshold, int, 0644);
+
+int linear_matrix_min_coeff_value = LINEAR_MATRIX_MIN_COEF_VALUE;
+module_param(linear_matrix_min_coeff_value, int, 0644);
+
+int linear_matrix_dimming_curve_factor = LINEAR_MATRIX_DIMMING_CURVE_FACTOR;
+module_param(linear_matrix_dimming_curve_factor, int, 0644);
+
+int use_segmented_dimming = 0;
+module_param(use_segmented_dimming, int, 0644);
+
+int segmented_dimming_switch_threshold = S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT;
+module_param(segmented_dimming_switch_threshold, int, 0644);
+
+u8 freq_cmd[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd, byte, NULL, 0644);
+
+u8 freq_cmd_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_ns, byte, NULL, 0644);
+
+u8 freq_cmd_high_brightness[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_high_brightness, byte, NULL, 0644);
+
+u8 freq_cmd_high_brightness_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_high_brightness_ns, byte, NULL, 0644);
+
+u8 freq_cmd_hbm[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_hbm, byte, NULL, 0644);
+
+u8 freq_cmd_hbm_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_hbm_ns, byte, NULL, 0644);
+
+u8 freq_cmd_hbm_high_brightness[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_hbm_high_brightness, byte, NULL, 0644);
+
+u8 freq_cmd_hbm_high_brightness_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
+module_param_array(freq_cmd_hbm_high_brightness_ns, byte, NULL, 0644);
+
+struct s6e3hc3_freq_cmdset {
+	u8 *cmd;
+	u8 *cmd_ns;
+	u8 *cmd_high_brightness;
+	u8 *cmd_high_brightness_ns;
+};
+
+enum s6e3hc3_freq_cmdset_type {
+	S6E3HC3_FREQ_CMDSET_NORMAL,
+	S6E3HC3_FREQ_CMDSET_HBM,
+	S6E3HC3_FREQ_CMDSET_TYPE_MAX
+};
+
+struct s6e3hc3_freq_cmdset s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_TYPE_MAX] = {
+	[S6E3HC3_FREQ_CMDSET_NORMAL] = {
+		.cmd = freq_cmd,
+		.cmd_ns = freq_cmd_ns,
+		.cmd_high_brightness = freq_cmd_high_brightness,
+		.cmd_high_brightness_ns = freq_cmd_high_brightness_ns,
+	},
+	[S6E3HC3_FREQ_CMDSET_HBM] = {
+		.cmd = freq_cmd_hbm,
+		.cmd_ns = freq_cmd_hbm_ns,
+		.cmd_high_brightness = freq_cmd_hbm_high_brightness,
+		.cmd_high_brightness_ns = freq_cmd_hbm_high_brightness_ns,
+	},
+};
+
+static int ea_set_matrix(struct drm_crtc *crtc, unsigned int bl_lvl)
+{
+	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+	struct exynos_matrix matrix;
+	struct drm_property *prop_linear_matrix_override;
+	struct drm_property_blob *pblob = NULL;
+	struct exynos_drm_crtc_state fake_crtc_state;
+	uint32_t blob_id;
+	__u16 ofs, coef;
+	int rc = 0;
+
+	if (crtc == NULL) {
+		pr_err("crtc has not been initialized\n");
+		rc = -EIO;
+		goto exit;
+	}
+
+	prop_linear_matrix_override = exynos_crtc->props.linear_matrix_override;
+	if (prop_linear_matrix_override == NULL) {
+		pr_err("linear matrix overriding is not supported by crtc\n");
+		rc = -EIO;
+		goto exit;
+	}
+
+	/* Will this ever happen? */
+	if (strcmp(prop_linear_matrix_override->name,
+		   "linear_matrix_override") != 0) {
+		pr_err("property name verification failed: %s\n",
+		       prop_linear_matrix_override->name);
+		rc = -EIO;
+		goto exit;
+	}
+
+	if (bl_lvl == 0) {
+		goto setup;
+	}
+
+	/*
+	 * Beware: the override itself does not form the final matrix.
+	 * It's ratio that would be applied to linear matrix requested by
+	 * userspace, and we need to set all elements in this matrix.
+	 */
+	ofs = LINEAR_MATRIX_OVERRIDE_SCALE_FACTOR; // = 100% (no scale)
+	matrix.offsets[0] = ofs;
+	matrix.offsets[1] = ofs;
+	matrix.offsets[2] = ofs;
+
+	coef = (LINEAR_MATRIX_OVERRIDE_SCALE_FACTOR - linear_matrix_dimming_curve_factor) 
+		* bl_lvl / linear_matrix_application_threshold;
+
+	// Ensure the coefficient doesn't go below a minimum value to avoid blackout
+	if (coef < linear_matrix_min_coeff_value) {
+    	coef = linear_matrix_min_coeff_value;
+	}
+
+	matrix.coeffs[0] = coef;
+	matrix.coeffs[1] = coef;
+	matrix.coeffs[2] = coef;
+	matrix.coeffs[3] = coef;
+	matrix.coeffs[4] = coef;
+	matrix.coeffs[5] = coef;
+	matrix.coeffs[6] = coef;
+	matrix.coeffs[7] = coef;
+	matrix.coeffs[8] = coef;
+
+	pblob = drm_property_create_blob(crtc->dev,
+					 sizeof(struct exynos_matrix), &matrix);
+	if (IS_ERR_OR_NULL(pblob)) {
+		pr_err("failed to create blob\n");
+		rc = -ENOMEM;
+		goto exit;
+	}
+
+setup:
+	/* This is not a complete DRM call, and never designed to be so.
+	 *
+	 * When exiting from LP mode (AOD), this function will be called during
+	 * userspace commit with crtc->mutex held by ourself, and we can not
+	 * use drm_crtc_get_state() here. Even if breaking AOD is acceptable,
+	 * we could not commit the change from here. I can't think of anything to
+	 * make this code less hacky.
+	 *
+	 * The crtc state here is one time use and thrown away after this call.
+	 * The crtc driver code saves the matrix into a global variable instead
+	 * upon receiving the atomic_set_property call. We need to free the
+	 * resources related to the state ourselves.
+	 */
+	memset(&fake_crtc_state, 0, sizeof(fake_crtc_state));
+	fake_crtc_state.base.crtc = crtc;
+
+	if (bl_lvl == 0)
+		blob_id = 0; // erase matrix
+	else
+		blob_id = pblob->base.id;
+
+	crtc->funcs->atomic_set_property(crtc, &fake_crtc_state.base,
+					 prop_linear_matrix_override, blob_id);
+
+	drm_property_blob_put(pblob);
+
+exit:
+	return rc;
+}
+
+static unsigned int ea_panel_calc_backlight(unsigned int bl_lvl)
+{
+	struct decon_device *decon = get_decon_drvdata(0);
+
+	if (linear_matrix_application_threshold == 0) {
+		linear_matrix_application_threshold = 1; // avoid dividing by 0
+	}
+
+	if (bl_lvl != 0 && bl_lvl < linear_matrix_application_threshold) {
+		ea_set_matrix(&decon->crtc->base, bl_lvl);
+		return linear_matrix_application_threshold;
+	} else {
+		ea_set_matrix(&decon->crtc->base, 0);
+		return bl_lvl;
+	}
+}
+
+static void s6e3hc3_send_dimming_freq_cmd(struct exynos_panel *ctx, int need_unlock, const u8 *cmd)
+{
+	if (need_unlock)
+		EXYNOS_DCS_BUF_ADD_SET(ctx, unlock_cmd_f0);
+
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+
+	if (need_unlock) {
+		EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+		EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);
+	}
+}
+
+static void s6e3hc3_set_default_dimming(struct exynos_panel *ctx, const unsigned long *feat, int need_unlock)
+{
+	static const u8 cmd[4] = {0x02, 0xBD, 0x00, 0x10};
+	static const u8 cmd_early_exit[4] = {0x82, 0xBD, 0x00, 0x10};
+	u8 target_cmd[4];
+
+	if (test_bit(FEAT_EARLY_EXIT, feat))
+		memcpy(target_cmd, cmd_early_exit, 4);
+	else
+		memcpy(target_cmd, cmd, 4);
+
+	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, target_cmd);
+}
+
+static void s6e3hc3_set_override_dimming(struct exynos_panel *ctx, const unsigned long *feat, int need_unlock)
+{
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+	bool is_hbm = test_bit(FEAT_HBM, feat);
+	bool is_ns_mode = test_bit(FEAT_OP_NS, feat);
+	bool is_sub120 = spanel->hw_vrefresh < 120;
+	struct s6e3hc3_freq_cmdset *cmdset;
+	u8 *cmd;
+	u8 target_cmd[4];
+
+	if (is_hbm)
+		cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_HBM];
+	else
+		cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_NORMAL];
+
+	if (use_segmented_dimming && spanel->requested_brightness > segmented_dimming_switch_threshold)
+		cmd = (is_ns_mode || is_sub120) ? cmdset->cmd_high_brightness_ns : cmdset->cmd_high_brightness;
+	else
+		cmd = (is_ns_mode || is_sub120) ? cmdset->cmd_ns : cmdset->cmd;
+
+	memcpy(target_cmd, cmd, 4);
+
+	if (!test_bit(FEAT_EARLY_EXIT, feat))
+		cmd[0] |= 0x80;
+
+	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, cmd);
+	
+	/* Send dimming frequency command
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+	bool is_ns_mode = test_bit(FEAT_OP_NS, spanel->feat);
+	bool is_high_brightness = ctx->bl->props.brightness > 2047; // Adjust threshold if needed
+	struct s6e3hc3_freq_cmdset *cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_NORMAL];
+	u8 *cmd;
+
+	if (is_high_brightness)
+		cmd = is_ns_mode ? cmdset->cmd_high_brightness_ns : cmdset->cmd_high_brightness;
+	else
+		cmd = is_ns_mode ? cmdset->cmd_ns : cmdset->cmd;
+
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+
+	EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+	*/
+}
 
 static u8 s6e3hc3_get_te2_option(struct exynos_panel *ctx)
 {
@@ -231,6 +534,23 @@ static void s6e3hc3_update_te2(struct exynos_panel *ctx)
 	EXYNOS_DCS_BUF_ADD(ctx, 0xB9, option);
 	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x14, 0xB9);
 	EXYNOS_DCS_BUF_ADD_SET(ctx, width);
+
+	/* Send dimming frequency command
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+	bool is_ns_mode = test_bit(FEAT_OP_NS, spanel->feat);
+	bool is_high_brightness = ctx->bl->props.brightness > 2047; // Adjust threshold if needed
+	struct s6e3hc3_freq_cmdset *cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_NORMAL];
+	u8 *cmd;
+
+	if (is_high_brightness)
+		cmd = is_ns_mode ? cmdset->cmd_high_brightness_ns : cmdset->cmd_high_brightness;
+	else
+		cmd = is_ns_mode ? cmdset->cmd_ns : cmdset->cmd;
+
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+
+	EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+	*/
 	EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);
 }
 
@@ -360,8 +680,10 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 * Description: early-exit sequence overrides some configs HBM set.
 	 */
 	if (test_bit(FEAT_EARLY_EXIT, spanel->feat)) {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		if (enable_pwm_mod == 0) {
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x10);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x03, 0x00, 0x0B, 0x00, 0x0B, 0x00,
@@ -370,14 +692,23 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 				 0x00, 0x00, 0x00, 0x00, 0x00);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
 	} else {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x82);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		if (enable_pwm_mod == 0) {
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x82);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x03, 0x00, 0x09, 0x00, 0x21, 0x00, 0x21, 0x00,
 				 0x21, 0x00, 0x21, 0x00, 0x21, 0x00, 0x00, 0x00,
 				 0x03, 0x00, 0x06, 0x00, 0x09, 0x00, 0x0C, 0x00,
 				 0x0F, 0x00, 0x0F, 0x00, 0x0F);
+	}
+	if (is_panel_enabled(ctx) && !ctx->current_mode->exynos_mode.is_lp_mode) {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+	} else {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_default_dimming(ctx, spanel->feat, false);
 	}
 
 	/*
@@ -673,7 +1004,9 @@ static void s6e3hc3_write_display_mode(struct exynos_panel *ctx,
 #define MAX_BR_HBM_EVT1 3949
 static int s6e3hc3_set_brightness(struct exynos_panel *ctx, u16 br)
 {
-	u16 brightness;
+	int ret;
+	u16 brightness, orig_br;
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 
 	if (ctx->current_mode->exynos_mode.is_lp_mode) {
 		const struct exynos_panel_funcs *funcs;
@@ -690,9 +1023,17 @@ static int s6e3hc3_set_brightness(struct exynos_panel *ctx, u16 br)
 			__func__, MAX_BR_HBM_EVT1);
 	}
 
+	orig_br = br;
+	if (use_linear_matrix)
+		br = ea_panel_calc_backlight(br);
+	
 	brightness = (br & 0xff) << 8 | br >> 8;
+	ret = exynos_dcs_set_brightness(ctx, brightness);
 
-	return exynos_dcs_set_brightness(ctx, brightness);
+	if (!ret)
+		spanel->requested_brightness = orig_br;
+
+	return ret;
 }
 
 static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
@@ -700,6 +1041,7 @@ static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
 {
 	u32 vrefresh = drm_mode_vrefresh(&pmode->mode);
 	u32 delay_us = mult_frac(1000, 1020, vrefresh);
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 
 	if (!ctx->enabled)
 		return;
@@ -707,6 +1049,8 @@ static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
 	EXYNOS_DCS_WRITE_TABLE(ctx, display_off);
 	usleep_range(delay_us, delay_us + 10);
 	/* backlight control and dimming */
+	if (enable_pwm_mod == 1)
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 	s6e3hc3_change_frequency(ctx, pmode);
 	usleep_range(delay_us, delay_us + 10);
@@ -827,6 +1171,7 @@ static int s6e3hc3_enable(struct drm_panel *panel)
 	const struct exynos_panel_mode *pmode = ctx->current_mode;
 	const struct drm_display_mode *mode;
 	const bool needs_reset = !is_panel_enabled(ctx);
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 	bool is_fhd;
 
 	if (!pmode) {
@@ -869,6 +1214,9 @@ static int s6e3hc3_enable(struct drm_panel *panel)
 		exynos_panel_set_lp_mode(ctx, pmode);
 	else if (needs_reset || (ctx->panel_state == PANEL_STATE_BLANK))
 		EXYNOS_DCS_WRITE_TABLE(ctx, display_on);
+
+	if (enable_pwm_mod == 1)
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
 
 	return 0;
 }
@@ -1044,11 +1392,18 @@ static void s6e3hc3_set_local_hbm_mode(struct exynos_panel *ctx,
 				 bool local_hbm_en)
 {
 	const struct exynos_panel_mode *pmode = ctx->current_mode;
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 	const u32 flags = PANEL_CMD_SET_IGNORE_VBLANK | PANEL_CMD_SET_BATCH;
 
-	if (local_hbm_en)
+	if (local_hbm_en){
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_default_dimming(ctx, spanel->feat, true);
 		exynos_panel_send_cmd_set_flags(ctx,
 			&s6e3hc3_lhbm_extra_cmd_set, flags);
+	} else {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+	}
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 }
 
