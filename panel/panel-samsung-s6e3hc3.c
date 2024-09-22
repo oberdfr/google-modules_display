@@ -69,6 +69,9 @@ struct s6e3hc3_panel {
 	/** @force_changeable_te: force changeable TE (instead of fixed) during early exit */
 	bool force_changeable_te;
 
+	/** @requested_brightness: requested brightness before exposure adjustment */
+	u16 requested_brightness;
+
 	/** @local_hbm_gamma: lhbm gamma data */
 	struct local_hbm_gamma {
 		u8 gamma_cmd[LHBM_GAMMA_CMD_SIZE];
@@ -112,6 +115,15 @@ static const unsigned char FHD_PPS_SETTING[DSC_PPS_SIZE] = {
 
 #define S6E3HC3_TE2_CHANGEABLE 0x31
 #define S6E3HC3_TE2_FIXED      0x41
+
+/**
+ * When segmented dimming is enabled, brightness higher than this is treated as
+ * high brightness and uses freq_cmd_high_brightness for backlight control.
+ * Otherwise freq_cmd is used.
+ *
+ * This feature is not turned on by default, and the default value is not tuned.
+ */
+#define S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT   600
 
 static const u8 unlock_cmd_f0[] = { 0xF0, 0x5A, 0x5A };
 static const u8 lock_cmd_f0[]   = { 0xF0, 0xA5, 0xA5 };
@@ -161,6 +173,147 @@ static const struct exynos_binned_lp s6e3hc3_binned_lp[] = {
 	BINNED_LP_MODE_TIMING("low", 80, s6e3hc3_lp_low_cmds, 16, 48),
 	BINNED_LP_MODE_TIMING("high", 2047, s6e3hc3_lp_high_cmds, 16, 48)
 };
+
+/*
+ *  Define PWM dimming frequency settings here, based on the s6e3hc3 driver mod
+ */
+
+int use_linear_matrix = 1;
+module_param(use_linear_matrix, int, 0644);
+
+int use_segmented_dimming = 0;
+module_param(use_segmented_dimming, int, 0644);
+
+int segmented_dimming_switch_threshold = S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT;
+module_param(segmented_dimming_switch_threshold, int, 0644);
+
+u8 freq_cmd[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd, byte, NULL, 0644);
+
+u8 freq_cmd_ns[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_ns, byte, NULL, 0644);
+
+u8 freq_cmd_high_brightness[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_high_brightness, byte, NULL, 0644);
+
+u8 freq_cmd_high_brightness_ns[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_high_brightness_ns, byte, NULL, 0644);
+
+u8 freq_cmd_hbm[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_hbm, byte, NULL, 0644);
+
+u8 freq_cmd_hbm_ns[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_hbm_ns, byte, NULL, 0644);
+
+u8 freq_cmd_hbm_high_brightness[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_hbm_high_brightness, byte, NULL, 0644);
+
+u8 freq_cmd_hbm_high_brightness_ns[4] = {0x00, 0x43, 0x43, 0x03};
+module_param_array(freq_cmd_hbm_high_brightness_ns, byte, NULL, 0644);
+
+struct s6e3hc3_freq_cmdset {
+	u8 *cmd;
+	u8 *cmd_ns;
+	u8 *cmd_high_brightness;
+	u8 *cmd_high_brightness_ns;
+};
+
+enum s6e3hc3_freq_cmdset_type {
+	S6E3HC3_FREQ_CMDSET_NORMAL,
+	S6E3HC3_FREQ_CMDSET_HBM,
+	S6E3HC3_FREQ_CMDSET_TYPE_MAX
+};
+
+struct s6e3hc3_freq_cmdset s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_TYPE_MAX] = {
+	[S6E3HC3_FREQ_CMDSET_NORMAL] = {
+		.cmd = freq_cmd,
+		.cmd_ns = freq_cmd_ns,
+		.cmd_high_brightness = freq_cmd_high_brightness,
+		.cmd_high_brightness_ns = freq_cmd_high_brightness_ns,
+	},
+	[S6E3HC3_FREQ_CMDSET_HBM] = {
+		.cmd = freq_cmd_hbm,
+		.cmd_ns = freq_cmd_hbm_ns,
+		.cmd_high_brightness = freq_cmd_hbm_high_brightness,
+		.cmd_high_brightness_ns = freq_cmd_hbm_high_brightness_ns,
+	},
+};
+
+
+static void s6e3hc3_send_dimming_freq_cmd(struct exynos_panel *ctx, int need_unlock, const u8 *cmd)
+{
+	if (need_unlock)
+		EXYNOS_DCS_BUF_ADD_SET(ctx, unlock_cmd_f0);
+
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+
+	if (need_unlock) {
+		EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+		EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);
+	}
+}
+
+static void s6e3hc3_set_default_dimming(struct exynos_panel *ctx, const unsigned long *feat, int need_unlock)
+{
+	static const u8 cmd[4] = {0x01, 0x83, 0x03, 0x03};
+	static const u8 hbm_cmd[4] = {0x00, 0x83, 0x03, 0x01};
+	u8 target_cmd[4];
+
+	if (test_bit(FEAT_HBM, feat))
+		memcpy(target_cmd, hbm_cmd, 4);
+	else
+		memcpy(target_cmd, cmd, 4);
+
+	if (!test_bit(FEAT_EARLY_EXIT, feat))
+		target_cmd[0] |= 0x80;
+
+	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, target_cmd);
+}
+
+static void s6e3hc3_set_override_dimming(struct exynos_panel *ctx, const unsigned long *feat, int need_unlock)
+{
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+	bool is_hbm = test_bit(FEAT_HBM, feat);
+	bool is_ns_mode = test_bit(FEAT_OP_NS, feat);
+	bool is_sub120 = spanel->hw_vrefresh < 120;
+	struct s6e3hc3_freq_cmdset *cmdset;
+	u8 *cmd;
+	u8 target_cmd[4];
+
+	if (is_hbm)
+		cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_HBM];
+	else
+		cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_NORMAL];
+
+	if (use_segmented_dimming && spanel->requested_brightness > segmented_dimming_switch_threshold)
+		cmd = (is_ns_mode || is_sub120) ? cmdset->cmd_high_brightness_ns : cmdset->cmd_high_brightness;
+	else
+		cmd = (is_ns_mode || is_sub120) ? cmdset->cmd_ns : cmdset->cmd;
+
+	memcpy(target_cmd, cmd, 4);
+
+	if (!test_bit(FEAT_EARLY_EXIT, feat))
+		cmd[0] |= 0x80;
+
+	s6e3hc3_send_dimming_freq_cmd(ctx, need_unlock, cmd);
+	
+	/* Send dimming frequency command
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+	bool is_ns_mode = test_bit(FEAT_OP_NS, spanel->feat);
+	bool is_high_brightness = ctx->bl->props.brightness > 2047; // Adjust threshold if needed
+	struct s6e3hc3_freq_cmdset *cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_NORMAL];
+	u8 *cmd;
+
+	if (is_high_brightness)
+		cmd = is_ns_mode ? cmdset->cmd_high_brightness_ns : cmdset->cmd_high_brightness;
+	else
+		cmd = is_ns_mode ? cmdset->cmd_ns : cmdset->cmd;
+
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+
+	EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+	*/
+}
 
 static u8 s6e3hc3_get_te2_option(struct exynos_panel *ctx)
 {
@@ -231,6 +384,23 @@ static void s6e3hc3_update_te2(struct exynos_panel *ctx)
 	EXYNOS_DCS_BUF_ADD(ctx, 0xB9, option);
 	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x14, 0xB9);
 	EXYNOS_DCS_BUF_ADD_SET(ctx, width);
+
+	/* Send dimming frequency command
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
+	bool is_ns_mode = test_bit(FEAT_OP_NS, spanel->feat);
+	bool is_high_brightness = ctx->bl->props.brightness > 2047; // Adjust threshold if needed
+	struct s6e3hc3_freq_cmdset *cmdset = &s6e3hc3_freq_cmdsets[S6E3HC3_FREQ_CMDSET_NORMAL];
+	u8 *cmd;
+
+	if (is_high_brightness)
+		cmd = is_ns_mode ? cmdset->cmd_high_brightness_ns : cmdset->cmd_high_brightness;
+	else
+		cmd = is_ns_mode ? cmdset->cmd_ns : cmdset->cmd;
+
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+
+	EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
+	*/
 	EXYNOS_DCS_BUF_ADD_SET_AND_FLUSH(ctx, lock_cmd_f0);
 }
 
@@ -359,25 +529,31 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 *
 	 * Description: early-exit sequence overrides some configs HBM set.
 	 */
-	if (test_bit(FEAT_EARLY_EXIT, spanel->feat)) {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x10);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x03, 0x00, 0x0B, 0x00, 0x0B, 0x00,
-				 0x0B, 0x00, 0x0B, 0x00, 0x0B, 0x00, 0x00, 0x00,
-				 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-				 0x00, 0x00, 0x00, 0x00, 0x00);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
+	if (is_panel_enabled(ctx) && !ctx->current_mode->exynos_mode.is_lp_mode)
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+	else
+		s6e3hc3_set_default_dimming(ctx, spanel->feat, false);
+	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+	val = test_bit(FEAT_EARLY_EXIT, spanel->feat) ? 0x22 : 0x00;
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, val);
+	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x82, 0xBD);
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, val, val, val, val);
+	val = test_bit(FEAT_OP_NS, spanel->feat) ? 0x4E : 0x1E;
+	EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, val, 0xBD);
+	if (test_bit(FEAT_HBM, spanel->feat)) {
+		if (test_bit(FEAT_OP_NS, spanel->feat))
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x02,
+				0x00, 0x04, 0x00, 0x0A, 0x00, 0x16, 0x00, 0x76);
+		else
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x01,
+				0x00, 0x03, 0x00, 0x0B, 0x00, 0x17, 0x00, 0x77);
 	} else {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x82);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x03, 0x00, 0x09, 0x00, 0x21, 0x00, 0x21, 0x00,
-				 0x21, 0x00, 0x21, 0x00, 0x21, 0x00, 0x00, 0x00,
-				 0x03, 0x00, 0x06, 0x00, 0x09, 0x00, 0x0C, 0x00,
-				 0x0F, 0x00, 0x0F, 0x00, 0x0F);
+		if (test_bit(FEAT_OP_NS, spanel->feat))
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x04,
+				0x00, 0x08, 0x00, 0x14, 0x00, 0x2C, 0x00, 0xEC);
+		else
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00, 0x02,
+				0x00, 0x06, 0x00, 0x16, 0x00, 0x2E, 0x00, 0xEE);
 	}
 
 	/*
@@ -700,6 +876,7 @@ static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
 {
 	u32 vrefresh = drm_mode_vrefresh(&pmode->mode);
 	u32 delay_us = mult_frac(1000, 1020, vrefresh);
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 
 	if (!ctx->enabled)
 		return;
@@ -707,6 +884,7 @@ static void s6e3hc3_set_nolp_mode(struct exynos_panel *ctx,
 	EXYNOS_DCS_WRITE_TABLE(ctx, display_off);
 	usleep_range(delay_us, delay_us + 10);
 	/* backlight control and dimming */
+	s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 	s6e3hc3_change_frequency(ctx, pmode);
 	usleep_range(delay_us, delay_us + 10);
@@ -827,6 +1005,7 @@ static int s6e3hc3_enable(struct drm_panel *panel)
 	const struct exynos_panel_mode *pmode = ctx->current_mode;
 	const struct drm_display_mode *mode;
 	const bool needs_reset = !is_panel_enabled(ctx);
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 	bool is_fhd;
 
 	if (!pmode) {
@@ -869,6 +1048,8 @@ static int s6e3hc3_enable(struct drm_panel *panel)
 		exynos_panel_set_lp_mode(ctx, pmode);
 	else if (needs_reset || (ctx->panel_state == PANEL_STATE_BLANK))
 		EXYNOS_DCS_WRITE_TABLE(ctx, display_on);
+
+	s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
 
 	return 0;
 }
@@ -1044,11 +1225,16 @@ static void s6e3hc3_set_local_hbm_mode(struct exynos_panel *ctx,
 				 bool local_hbm_en)
 {
 	const struct exynos_panel_mode *pmode = ctx->current_mode;
+	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 	const u32 flags = PANEL_CMD_SET_IGNORE_VBLANK | PANEL_CMD_SET_BATCH;
 
-	if (local_hbm_en)
+	if (local_hbm_en){
+		s6e3hc3_set_default_dimming(ctx, spanel->feat, true);
 		exynos_panel_send_cmd_set_flags(ctx,
 			&s6e3hc3_lhbm_extra_cmd_set, flags);
+	} else {
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
+	}
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 }
 
