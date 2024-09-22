@@ -201,28 +201,28 @@ module_param(use_segmented_dimming, int, 0644);
 int segmented_dimming_switch_threshold = S6E3HC3_DIMMING_SWITCH_THRESHOLD_DEFAULT;
 module_param(segmented_dimming_switch_threshold, int, 0644);
 
-u8 freq_cmd[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd, byte, NULL, 0644);
 
-u8 freq_cmd_ns[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_ns, byte, NULL, 0644);
 
-u8 freq_cmd_high_brightness[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_high_brightness[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_high_brightness, byte, NULL, 0644);
 
-u8 freq_cmd_high_brightness_ns[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_high_brightness_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_high_brightness_ns, byte, NULL, 0644);
 
-u8 freq_cmd_hbm[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_hbm, byte, NULL, 0644);
 
-u8 freq_cmd_hbm_ns[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_hbm_ns, byte, NULL, 0644);
 
-u8 freq_cmd_hbm_high_brightness[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm_high_brightness[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_hbm_high_brightness, byte, NULL, 0644);
 
-u8 freq_cmd_hbm_high_brightness_ns[4] = {0x01, 0x43, 0x43, 0x03};
+u8 freq_cmd_hbm_high_brightness_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_hbm_high_brightness_ns, byte, NULL, 0644);
 
 int linear_matrix_application_threshold = LINEAR_MATRIX_APPLY_THRESHOLD_DEFAULT;
@@ -661,8 +661,10 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 * Description: early-exit sequence overrides some configs HBM set.
 	 */
 	if (test_bit(FEAT_EARLY_EXIT, spanel->feat)) {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		if (enable_pwm_mod == 0) {
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x10);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x03, 0x00, 0x0B, 0x00, 0x0B, 0x00,
@@ -671,8 +673,10 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 				 0x00, 0x00, 0x00, 0x00, 0x00);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
 	} else {
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x82);
-		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		if (enable_pwm_mod == 0) {
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x82);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
+		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x03, 0x00, 0x09, 0x00, 0x21, 0x00, 0x21, 0x00,
@@ -1193,7 +1197,7 @@ static int s6e3hc3_enable(struct drm_panel *panel)
 		EXYNOS_DCS_WRITE_TABLE(ctx, display_on);
 
 	if (enable_pwm_mod == 1)
-		s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+		s6e3hc3_set_override_dimming(ctx, spanel->feat, true);
 
 	return 0;
 }
