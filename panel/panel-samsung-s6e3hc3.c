@@ -398,7 +398,7 @@ static void s6e3hc3_send_dimming_freq_cmd(struct exynos_panel *ctx, int need_unl
 	if (need_unlock)
 		EXYNOS_DCS_BUF_ADD_SET(ctx, unlock_cmd_f0);
 
-	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3]);
+	EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, cmd[0], cmd[1], cmd[2], cmd[3], 0xBD);
 
 	if (need_unlock) {
 		EXYNOS_DCS_BUF_ADD_SET(ctx, freq_update);
@@ -679,6 +679,13 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 *
 	 * Description: early-exit sequence overrides some configs HBM set.
 	 */
+	if (is_panel_enabled(ctx) && !ctx->current_mode->exynos_mode.is_lp_mode) {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+	} else {
+		if (enable_pwm_mod == 1)
+			s6e3hc3_set_default_dimming(ctx, spanel->feat, false);
+	}
 	if (test_bit(FEAT_EARLY_EXIT, spanel->feat)) {
 		if (enable_pwm_mod == 0) {
 			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21, 0x02);
@@ -702,13 +709,6 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 				 0x21, 0x00, 0x21, 0x00, 0x21, 0x00, 0x00, 0x00,
 				 0x03, 0x00, 0x06, 0x00, 0x09, 0x00, 0x0C, 0x00,
 				 0x0F, 0x00, 0x0F, 0x00, 0x0F);
-	}
-	if (is_panel_enabled(ctx) && !ctx->current_mode->exynos_mode.is_lp_mode) {
-		if (enable_pwm_mod == 1)
-			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
-	} else {
-		if (enable_pwm_mod == 1)
-			s6e3hc3_set_default_dimming(ctx, spanel->feat, false);
 	}
 
 	/*
@@ -1395,15 +1395,18 @@ static void s6e3hc3_set_local_hbm_mode(struct exynos_panel *ctx,
 	struct s6e3hc3_panel *spanel = to_spanel(ctx);
 	const u32 flags = PANEL_CMD_SET_IGNORE_VBLANK | PANEL_CMD_SET_BATCH;
 
-	if (local_hbm_en){
+	if (local_hbm_en)
 		if (enable_pwm_mod == 1)
 			s6e3hc3_set_default_dimming(ctx, spanel->feat, true);
+
+	if (!local_hbm_en)
+			if (enable_pwm_mod == 1)
+			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
+
+	if (local_hbm_en)	
 		exynos_panel_send_cmd_set_flags(ctx,
 			&s6e3hc3_lhbm_extra_cmd_set, flags);
-	} else {
-		if (enable_pwm_mod == 1)
-			s6e3hc3_set_override_dimming(ctx, spanel->feat, false);
-	}
+
 	s6e3hc3_write_display_mode(ctx, &pmode->mode);
 }
 
