@@ -119,6 +119,16 @@ static const unsigned char FHD_PPS_SETTING[DSC_PPS_SIZE] = {
 #define S6E3HC3_TE2_FIXED      0x41
 
 /**
+ * Default High Refresh rate panel command value
+ * 120hz: 0x00 (default)
+ * 90hz:  0x08
+ * 60hz:  0x0E
+ * 30hz:  0x02
+ * 10hz:  0x03
+ */
+#define S6E3HC3_HS_DEFAULT_VALUE 0x00
+
+/**
  * When segmented dimming is enabled, brightness higher than this is treated as
  * high brightness and uses freq_cmd_high_brightness for backlight control.
  * Otherwise freq_cmd is used.
@@ -196,7 +206,7 @@ static const struct exynos_binned_lp s6e3hc3_binned_lp[] = {
 };
 
 /*
- *  Define PWM dimming frequency settings here, based on the s6e3hc3 driver mod
+ * PWM dimming frequency commands
  */
 
 int enable_pwm_mod = 0;
@@ -243,6 +253,13 @@ module_param_array(freq_cmd_hbm_high_brightness, byte, NULL, 0644);
 
 u8 freq_cmd_hbm_high_brightness_ns[4] = {0x02, 0xBD, 0xBD, 0x10};
 module_param_array(freq_cmd_hbm_high_brightness_ns, byte, NULL, 0644);
+
+/*
+ * refresh rate frequency commands
+ */
+
+u8 custom_hs_refresh_val = 0x00;
+module_param(custom_hs_refresh_val, byte, 0644);
 
 struct s6e3hc3_freq_cmdset {
 	u8 *cmd;
@@ -771,8 +788,10 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 				val = 0x02;
 			else if (vrefresh == 60)
 				val = 0x01;
+			else if (vrefresh == 90)
+				val = 0x08;
 			else
-				val = 0x00;
+				val = custom_hs_refresh_val;
 		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0x60, val);
 	}
@@ -1467,7 +1486,7 @@ static const u32 s6e3hc3_bl_range[] = {
 };
 
 static const int s6e3hc3_vrefresh_range[] = {
-	10, 30, 60, 120
+	10, 30, 60, 90, 120
 };
 
 static const int s6e3hc3_lp_vrefresh_range[] = {
@@ -1510,6 +1529,42 @@ static const struct exynos_panel_mode s6e3hc3_modes[] = {
 			.falling_edge = 48,
 		},
 		.idle_mode = IDLE_MODE_ON_SELF_REFRESH,
+	},
+	{
+		/* 1440x3120 @ 90Hz */
+		.mode = {
+			.name = "1440x3120x90",
+			.clock = 447930,
+			.hdisplay = 1440,
+			.hsync_start = 1440 + 80, // add hfp
+			.hsync_end = 1440 + 80 + 24, // add hsa
+			.htotal = 1440 + 80 + 24 + 36, // add hbp
+			.vdisplay = 3120,
+			.vsync_start = 3120 + 12, // add vfp
+			.vsync_end = 3120 + 12 + 4, // add vsa
+			.vtotal = 3120 + 12 + 4 + 14, // add vbp
+			.flags = 0,
+			.width_mm = 71,
+			.height_mm = 155,
+		},
+		.exynos_mode = {
+			.mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS,
+			.vblank_usec = 120,
+			.te_usec = 150,
+			.bpc = 8,
+			.dsc = {
+				.enabled = true,
+				.dsc_count = 2,
+				.slice_count = 2,
+				.slice_height = 52,
+			},
+			.underrun_param = &underrun_param,
+		},
+		.te2_timing = {
+			.rising_edge = 16,
+			.falling_edge = 48,
+		},
+		.idle_mode = IDLE_MODE_ON_INACTIVITY,
 	},
 	{
 		/* 1440x3120 @ 120Hz */
@@ -1581,6 +1636,42 @@ static const struct exynos_panel_mode s6e3hc3_modes[] = {
 			.falling_edge = 48,
 		},
 		.idle_mode = IDLE_MODE_ON_SELF_REFRESH,
+	},
+	{
+		/* 1080x2340 @ 90Hz */
+		.mode = {
+			.name = "1080x2340x90",
+			.clock = 260226,
+			.hdisplay = 1080,
+			.hsync_start = 1080 + 80, // add hfp
+			.hsync_end = 1080 + 80 + 24, // add hsa
+			.htotal = 1080 + 80 + 24 + 36, // add hbp
+			.vdisplay = 2340,
+			.vsync_start = 2340 + 12, // add vfp
+			.vsync_end = 2340 + 12 + 4, // add vsa
+			.vtotal = 2340 + 12 + 4 + 14, // add vbp
+			.flags = 0,
+			.width_mm = 71,
+			.height_mm = 155,
+		},
+		.exynos_mode = {
+			.mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS,
+			.vblank_usec = 120,
+			.te_usec = 150,
+			.bpc = 8,
+			.dsc = {
+				.enabled = true,
+				.dsc_count = 2,
+				.slice_count = 2,
+				.slice_height = 78,
+			},
+			.underrun_param = &underrun_param,
+		},
+		.te2_timing = {
+			.rising_edge = 16,
+			.falling_edge = 48,
+		},
+		.idle_mode = IDLE_MODE_ON_INACTIVITY,
 	},
 	{
 		/* 1080x2340 @ 120Hz */
