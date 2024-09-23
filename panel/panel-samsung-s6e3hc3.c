@@ -154,7 +154,7 @@ static const unsigned char FHD_PPS_SETTING[DSC_PPS_SIZE] = {
 /**
  * Factor to control non-linear dimming (higher = less aggressive)
  */
-#define LINEAR_MATRIX_DIMMING_CURVE_FACTOR 2048
+#define LINEAR_MATRIX_DIMMING_CURVE_FACTOR 0
 
 static const u8 unlock_cmd_f0[] = { 0xF0, 0x5A, 0x5A };
 static const u8 lock_cmd_f0[]   = { 0xF0, 0xA5, 0xA5 };
