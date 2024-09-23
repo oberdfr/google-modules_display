@@ -735,63 +735,135 @@ static void s6e3hc3_update_panel_feat(struct exynos_panel *ctx,
 	 * and operation set, depending on FI mode.
 	 */
 	if (test_bit(FEAT_FRAME_AUTO, spanel->feat)) {
-		if (test_bit(FEAT_HBM, spanel->feat)) {
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x10, 0xBD);
-			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x14);
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-			if (test_bit(FEAT_OP_NS, spanel->feat)) {
-				/* suppose that idle_vrefresh == 30 */
-				EXYNOS_DCS_BUF_ADD(ctx,
-					0xBD, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			/* threshold setting */
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x0C, 0xBD);
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00);
+		} else {
+			/* initial frequency */
+			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x92, 0xBD);
+			if (vrefresh == 60) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x01 : 0x02;
 			} else {
-				/* suppose that idle_vrefresh == 30 */
-				EXYNOS_DCS_BUF_ADD(ctx,
-					0xBD, 0x01, 0x00, 0x03, 0x00, 0x02, 0x01);
+				if (vrefresh != 120 && vrefresh != 90)
+					dev_warn(ctx->dev, "%s: unsupported init freq %d (hs)\n",
+						 __func__, vrefresh);
+				/* 120Hz */
+				val = 0x00;
+			}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, val);
+		}
+		/* target frequency */
+		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x12, 0xBD);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			if (idle_vrefresh == 30) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x02 : 0x04;
+			} else if (idle_vrefresh == 10) {
+				if (idle_vrefresh != 1)
+					dev_warn(ctx->dev, "%s: unsupported target freq %d (ns)\n",
+						 __func__, idle_vrefresh);
+				/* 10Hz */
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x0A : 0x14;
+			}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, val);
+		} else {
+			if (idle_vrefresh == 30) {
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x03 : 0x06;
+			} else if (idle_vrefresh == 10) {
+				if (idle_vrefresh != 1)
+					dev_warn(ctx->dev, "%s: unsupported target freq %d (hs)\n",
+						 __func__, idle_vrefresh);
+				/* 10Hz */
+				val = test_bit(FEAT_HBM, spanel->feat) ? 0x0B : 0x16;
+			}
+			EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, val);
+		}
+		/* step setting */
+		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x9E, 0xBD);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			if (test_bit(FEAT_HBM, spanel->feat))
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x02, 0x00, 0x0A, 0x00, 0x00);
+			else
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x04, 0x00, 0x14, 0x00, 0x00);
+		} else {
+			if (test_bit(FEAT_HBM, spanel->feat))
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x01, 0x00, 0x03, 0x00, 0x0B);
+			else
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x02, 0x00, 0x06, 0x00, 0x16);
+		}
+		EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0xAE, 0xBD);
+		if (test_bit(FEAT_OP_NS, spanel->feat)) {
+			if (idle_vrefresh == 30) {
+				/* 60Hz -> 30Hz idle */
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00);
+			} else if (idle_vrefresh == 10) {
+				if (idle_vrefresh != 10)
+					dev_warn(ctx->dev, "%s: unsupported freq step to %d (ns)\n",
+						 __func__, idle_vrefresh);
+				/* 60Hz -> 10Hz idle */
+				EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x00);
 			}
 		} else {
-			EXYNOS_DCS_BUF_ADD(ctx, 0xB0, 0x00, 0x21, 0xBD);
-			if (test_bit(FEAT_OP_NS, spanel->feat)) {
-				if (idle_vrefresh == 10)
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x05, 0x00, 0x01, 0x01);
-				/* idle_vrefresh == 30 */
-				else
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00);
+			if (vrefresh == 60) {
+				if (idle_vrefresh == 30) {
+					/* 60Hz -> 30Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x00, 0x00);
+				} else if (idle_vrefresh == 10) {
+					if (idle_vrefresh != 10)
+						dev_warn(ctx->dev, "%s: unsupported freq step to %d (hs)\n",
+							 __func__, vrefresh);
+					/* 60Hz -> 10Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x01, 0x01, 0x00);
+				}
 			} else {
-				if (idle_vrefresh == 10)
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x0B, 0x00, 0x03, 0x01);
-				else if (idle_vrefresh == 30)
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x03, 0x00, 0x02, 0x01);
-				/* idle_vrefresh == 60 */
-				else
-					EXYNOS_DCS_BUF_ADD(ctx,
-						0xBD, 0x01, 0x00, 0x01, 0x00, 0x02, 0x01);
+				if (vrefresh != 120 && vrefresh != 90)
+					dev_warn(ctx->dev, "%s: unsupported freq step from %d (hs)\n",
+						 __func__, vrefresh);
+				if (idle_vrefresh == 30) {
+					/* 120Hz -> 30Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x00, 0x00);
+				} else if (idle_vrefresh == 10) {
+					if (idle_vrefresh != 10)
+						dev_warn(ctx->dev, "%s: unsupported freq step to %d (hs)\n",
+						 __func__, idle_vrefresh);
+					/* 120Hz -> 10Hz idle */
+					EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x00, 0x03, 0x00);
+				}
 			}
 		}
-		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x23);
-	} else {
+		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0xA3);
+	} else { /* manual */
 		EXYNOS_DCS_BUF_ADD(ctx, 0xBD, 0x21);
 		if (test_bit(FEAT_OP_NS, spanel->feat)) {
-			if (vrefresh == 10)
+			if (vrefresh == 10) {
 				val = 0x1B;
-			else if (vrefresh == 30)
+			} else if (vrefresh == 30) {
 				val = 0x19;
-			else
+			} else {
+				if (vrefresh != 60)
+					dev_warn(ctx->dev,
+						 "%s: unsupported manual freq %d (ns)\n",
+						 __func__, vrefresh);
+				/* 60Hz */
 				val = 0x18;
+			}
 		} else {
-			if (vrefresh == 10)
+			if (vrefresh == 10) {
 				val = 0x03;
-			else if (vrefresh == 30)
+			} else if (vrefresh == 30) {
 				val = 0x02;
-			else if (vrefresh == 60)
+			} else if (vrefresh == 60) {
 				val = 0x01;
-			else if (vrefresh == 90)
+			}else if (vrefresh == 90) {
 				val = 0x08;
-			else
+			} else {
+				if (vrefresh != 120)
+					dev_warn(ctx->dev,
+						 "%s: unsupported manual freq %d (hs)\n",
+						 __func__, vrefresh);
+				/* 120Hz */
 				val = custom_hs_refresh_val;
+			}
 		}
 		EXYNOS_DCS_BUF_ADD(ctx, 0x60, val);
 	}
